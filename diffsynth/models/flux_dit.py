@@ -78,7 +78,7 @@ class AttentionStore:
         self.joint_count = 0
         self.single_count = 0
         self.enable = True
-        self.gt = gt.detach() if gt else None
+        self.gt = gt.detach() if gt is not None else None
         self.ce_loss = torch.nn.CrossEntropyLoss()
         self.token_loss = token_loss
         self.loss_ce = []
@@ -104,7 +104,7 @@ class AttentionStore:
             return
 
         attn = attn.reshape((attn.shape[0], attn.shape[1], 64, 64))
-        if self.gt:
+        if self.gt is not None:
             loss_ce = self.ce_loss(attn, self.gt)
             self.loss_ce.append(loss_ce)
             loss_token = self.token_loss(attn, self.gt)

@@ -127,17 +127,18 @@ class LightningModel(LightningModelForT2ILoRA):
         # loss_token = token_loss(joint_attn, seg_mask) + token_loss(single_attn, seg_mask)
         # loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
         loss_ce = loss_ce * self.pipe.scheduler.training_weight(timestep)
-        loss_token = token_loss(noise_pred, seg_mask) * self.pipe.scheduler.training_weight(timestep)
+        loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
 
-        loss = loss_mse + self.mask_loss_weight * (self.ce_loss_weight * loss_ce + self.token_loss_weight * loss_token)
+        loss = loss_mse
+        # + self.mask_loss_weight * (self.ce_loss_weight * loss_ce + self.token_loss_weight * loss_token)
 
         # Record log
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log("train_loss", loss, prog_bar=True, logger=True)
         self.log("train/lr", current_lr, prog_bar=True, logger=True)
-        self.log("train/mse_loss", loss_mse, prog_bar=True, logger=True)
-        self.log("train/ce_loss", loss_ce, prog_bar=True, logger=True)
-        self.log("train/token_loss", loss_token, prog_bar=True, logger=True)
+        # self.log("train/mse_loss", loss_mse, prog_bar=True, logger=True)
+        # self.log("train/ce_loss", loss_ce, prog_bar=True, logger=True)
+        # self.log("train/token_loss", loss_token, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
