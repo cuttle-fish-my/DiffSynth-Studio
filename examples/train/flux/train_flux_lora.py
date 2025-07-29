@@ -110,7 +110,7 @@ class LightningModel(LightningModelForT2ILoRA):
         noisy_latents = self.pipe.scheduler.add_noise(latents, noise, timestep)
         training_target = self.pipe.scheduler.training_target(latents, noise, timestep)
 
-        noise_pred, joint_attn, single_attn = self.pipe.denoising_model()(
+        noise_pred, loss_ce, loss_token = self.pipe.denoising_model()(
             noisy_latents, timestep=timestep, **prompt_emb, **extra_input, **eligen_kwargs_posi,
             use_gradient_checkpointing=self.use_gradient_checkpointing, conditioning=3.5,
             return_attn_maps=True, mask_gt=seg_mask
@@ -121,11 +121,13 @@ class LightningModel(LightningModelForT2ILoRA):
 
         # AM loss
 
-        ce_loss = torch.nn.functional.cross_entropy
-        loss_ce = ce_loss(joint_attn, seg_mask) + ce_loss(single_attn, seg_mask)
+        # ce_loss = torch.nn.functional.cross_entropy
+        # loss_ce = ce_loss(joint_attn, seg_mask) + ce_loss(single_attn, seg_mask)
+        # loss_ce = loss_ce * self.pipe.scheduler.training_weight(timestep)
+        # loss_token = token_loss(joint_attn, seg_mask) + token_loss(single_attn, seg_mask)
+        # loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
         loss_ce = loss_ce * self.pipe.scheduler.training_weight(timestep)
-        loss_token = token_loss(joint_attn, seg_mask) + token_loss(single_attn, seg_mask)
-        loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
+        loss_token = token_loss(noise_pred, seg_mask) * self.pipe.scheduler.training_weight(timestep)
 
         loss = loss_mse + self.mask_loss_weight * (self.ce_loss_weight * loss_ce + self.token_loss_weight * loss_token)
 

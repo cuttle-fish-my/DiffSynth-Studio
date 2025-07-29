@@ -81,6 +81,8 @@ class AttentionStore:
         self.gt = gt.detach() if gt else None
         self.ce_loss = torch.nn.CrossEntropyLoss()
         self.token_loss = token_loss
+        self.loss_ce = []
+        self.loss_token = []
 
     def enable_store(self, flag: bool):
         self.enable = flag
@@ -102,21 +104,39 @@ class AttentionStore:
             return
 
         attn = attn.reshape((attn.shape[0], attn.shape[1], 64, 64))
+        if self.gt:
+            loss_ce = self.ce_loss(attn, self.gt)
+            self.loss_ce.append(loss_ce)
+            loss_token = self.token_loss(attn, self.gt)
+            self.loss_token.append(loss_token)
 
-        # if mode == 'joint':
-        #     if self.joint_attn_store is None:
-        #         self.joint_attn_store = attn
-        #     else:
-        #         self.joint_attn_store = self.joint_attn_store + attn
-        #     self.joint_count += 1
-        # elif mode == 'single':
-        #     if self.single_attn_store is None:
-        #         self.single_attn_store = attn
-        #     else:
-        #         self.single_attn_store = self.single_attn_store + attn
-        #     self.single_count += 1
-        # else:
-        #     raise NotImplementedError
+        attn = attn.detach().float().cpu()
+
+        if mode == 'joint':
+            if self.joint_attn_store is None:
+                self.joint_attn_store = attn
+            else:
+                self.joint_attn_store = self.joint_attn_store + attn
+            self.joint_count += 1
+        elif mode == 'single':
+            if self.single_attn_store is None:
+                self.single_attn_store = attn
+            else:
+                self.single_attn_store = self.single_attn_store + attn
+            self.single_count += 1
+        else:
+            raise NotImplementedError
+
+    def aggregate_loss(self):
+        if self.joint_count == 0 or self.single_count == 0:
+            return None, None
+
+        loss_ce = torch.stack(self.loss_ce).mean() if self.loss_ce else None
+        loss_token = torch.stack(self.loss_token).mean() if self.loss_token else None
+
+
+        self.empty_store()
+        return loss_ce, loss_token
 
     def aggregate_attention(self):
         if self.joint_count == 0 or self.single_count == 0:
@@ -125,14 +145,14 @@ class AttentionStore:
         joint_attn = self.joint_attn_store / self.joint_count
         single_attn = self.single_attn_store / self.single_count
 
-        un_patchify_size = int((joint_attn.shape[-1]) ** 0.5)
-        joint_attn = joint_attn.reshape(joint_attn.shape[0], joint_attn.shape[1], un_patchify_size, un_patchify_size)
-        single_attn = single_attn.reshape(single_attn.shape[0], single_attn.shape[1], un_patchify_size,
-                                          un_patchify_size)
-
-        # Detach results before clearing store
-        joint_attn = joint_attn
-        single_attn = single_attn
+        # un_patchify_size = int((joint_attn.shape[-1]) ** 0.5)
+        # joint_attn = joint_attn.reshape(joint_attn.shape[0], joint_attn.shape[1], un_patchify_size, un_patchify_size)
+        # single_attn = single_attn.reshape(single_attn.shape[0], single_attn.shape[1], un_patchify_size,
+        #                                   un_patchify_size)
+        #
+        # # Detach results before clearing store
+        # joint_attn = joint_attn
+        # single_attn = single_attn
 
         self.empty_store()
         return joint_attn, single_attn
@@ -602,9 +622,10 @@ class FluxDiT(torch.nn.Module):
         hidden_states = self.final_proj_out(hidden_states)
         hidden_states = self.unpatchify(hidden_states, height, width)
         if return_attn_maps:
-            joint_attn, single_attn = attn_store.aggregate_attention()
+            # joint_attn, single_attn = attn_store.aggregate_attention()
+            loss_ce, loss_token = attn_store.aggregate_loss()
             del attn_store
-            return hidden_states, joint_attn, single_attn
+            return hidden_states, loss_ce, loss_token
         return hidden_states
 
     def quantize(self):

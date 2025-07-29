@@ -28,7 +28,7 @@ def example(pipe, seeds, example_id, global_prompt, entity_prompts):
 # download and load model
 model_manager = ModelManager(torch_dtype=torch.bfloat16, device="cuda", model_id_list=["FLUX.1-dev"])
 # set download_from_modelscope = False if you want to download model from huggingface
-download_from_modelscope = True
+download_from_modelscope = False
 if download_from_modelscope:
     model_id = "DiffSynth-Studio/Eligen"
     downloading_priority = ["ModelScope"]
