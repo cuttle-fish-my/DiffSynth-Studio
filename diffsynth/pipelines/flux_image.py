@@ -14,7 +14,7 @@ from ..models.tiler import FastTileWorker
 from transformers import SiglipVisionModel
 from copy import deepcopy
 from transformers.models.t5.modeling_t5 import T5LayerNorm, T5DenseActDense, T5DenseGatedActDense
-from ..models.flux_dit import RMSNorm, AttentionStore
+from ..models.flux_dit import RMSNorm
 from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear
 import torch.nn.functional as F
 
@@ -579,7 +579,7 @@ class FluxImagePipeline(BasePipeline):
                     self.dit.attn_store.enable_store(False)
                 noise_pred_nega = lets_dance_flux(
                     dit=self.dit, controlnet=self.controlnet, step1x_connector=self.step1x_connector,
-                    hidden_states=latents, timestep=timestep, return_attn_maps=Flase,
+                    hidden_states=latents, timestep=timestep, return_attn_maps=False,
                     **prompt_emb_nega, **tiler_kwargs, **extra_input, **controlnet_kwargs_nega,
                     **ipadapter_kwargs_list_nega, **eligen_kwargs_nega, **infiniteyou_kwargs, **flex_kwargs,
                     **step1x_kwargs_nega,

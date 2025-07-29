@@ -363,7 +363,7 @@ def launch_training_task(model, args):
     trainer.fit(
         model=model,
         train_dataloaders=train_loader,
-        # val_dataloaders=val_loader
+        # val_dataloaders=val_loader # TODO: remove this if not needed
     )
 
     # Upload models

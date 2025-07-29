@@ -71,93 +71,6 @@ def token_loss(attn_map, seg_mask):
     return (1 - (attn_map * seg_mask).sum(dim=(2, 3)) / (attn_map.sum(dim=(2, 3)) + 1e-5)).mean()
 
 
-class AttentionStore:
-    def __init__(self, gt):
-        self.joint_attn_store = 0
-        self.single_attn_store = 0
-        self.joint_count = 0
-        self.single_count = 0
-        self.enable = True
-        self.gt = gt.detach() if gt is not None else None
-        self.ce_loss = torch.nn.CrossEntropyLoss()
-        self.token_loss = token_loss
-        self.loss_ce = []
-        self.loss_token = []
-
-    def enable_store(self, flag: bool):
-        self.enable = flag
-
-    def empty_store(self):
-        # Explicitly delete tensors to free memory
-        if self.joint_attn_store is not None:
-            del self.joint_attn_store
-        if self.single_attn_store is not None:
-            del self.single_attn_store
-        self.joint_attn_store = None
-        self.single_attn_store = None
-        self.joint_count = 0
-        self.single_count = 0
-        torch.cuda.empty_cache()
-
-    def store_attention_probs(self, attn, mode: str):
-        if not self.enable:
-            return
-
-        attn = attn.reshape((attn.shape[0], attn.shape[1], 64, 64))
-        if self.gt is not None:
-            loss_ce = self.ce_loss(attn, self.gt)
-            self.loss_ce.append(loss_ce)
-            loss_token = self.token_loss(attn, self.gt)
-            self.loss_token.append(loss_token)
-
-        attn = attn.detach().float().cpu()
-
-        if mode == 'joint':
-            if self.joint_attn_store is None:
-                self.joint_attn_store = attn
-            else:
-                self.joint_attn_store = self.joint_attn_store + attn
-            self.joint_count += 1
-        elif mode == 'single':
-            if self.single_attn_store is None:
-                self.single_attn_store = attn
-            else:
-                self.single_attn_store = self.single_attn_store + attn
-            self.single_count += 1
-        else:
-            raise NotImplementedError
-
-    def aggregate_loss(self):
-        if self.joint_count == 0 or self.single_count == 0:
-            return None, None
-
-        loss_ce = torch.stack(self.loss_ce).mean() if self.loss_ce else None
-        loss_token = torch.stack(self.loss_token).mean() if self.loss_token else None
-
-
-        self.empty_store()
-        return loss_ce, loss_token
-
-    def aggregate_attention(self):
-        if self.joint_count == 0 or self.single_count == 0:
-            return None, None
-
-        joint_attn = self.joint_attn_store / self.joint_count
-        single_attn = self.single_attn_store / self.single_count
-
-        # un_patchify_size = int((joint_attn.shape[-1]) ** 0.5)
-        # joint_attn = joint_attn.reshape(joint_attn.shape[0], joint_attn.shape[1], un_patchify_size, un_patchify_size)
-        # single_attn = single_attn.reshape(single_attn.shape[0], single_attn.shape[1], un_patchify_size,
-        #                                   un_patchify_size)
-        #
-        # # Detach results before clearing store
-        # joint_attn = joint_attn
-        # single_attn = single_attn
-
-        self.empty_store()
-        return joint_attn, single_attn
-
-
 class RoPEEmbedding(torch.nn.Module):
     def __init__(self, dim, theta, axes_dim):
         super().__init__()
@@ -236,8 +149,8 @@ class FluxJointAttention(torch.nn.Module):
 
         if attn_store is not None and attn_store.enable:
             entity_attn_maps = get_attn_map(q, k)
-            # TODO: add attn_store implementation
             attn_store.store_attention_probs(entity_attn_maps, mode="joint")
+
 
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
@@ -278,15 +191,21 @@ class FluxJointTransformerBlock(torch.nn.Module):
             torch.nn.GELU(approximate="tanh"),
             torch.nn.Linear(dim * 4, dim)
         )
+        self.attn_store = None
+
+    def register_attn_store(self, attn_store):
+        if self.attn_store is not None:
+            raise ValueError("Attention store already registered.")
+        self.attn_store = attn_store
 
     def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None,
-                ipadapter_kwargs_list=None, attn_store=None):
+                ipadapter_kwargs_list=None):
         norm_hidden_states_a, gate_msa_a, shift_mlp_a, scale_mlp_a, gate_mlp_a = self.norm1_a(hidden_states_a, emb=temb)
         norm_hidden_states_b, gate_msa_b, shift_mlp_b, scale_mlp_b, gate_mlp_b = self.norm1_b(hidden_states_b, emb=temb)
 
         # Attention
         attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb,
-                                                 attn_mask, ipadapter_kwargs_list, attn_store=attn_store)
+                                                 attn_mask, ipadapter_kwargs_list, attn_store=self.attn_store)
 
         # Part A
         hidden_states_a = hidden_states_a + gate_msa_a * attn_output_a
@@ -362,6 +281,12 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         self.norm_k_a = RMSNorm(self.head_dim, eps=1e-6)
 
         self.proj_out = torch.nn.Linear(dim * 5, dim)
+        self.attn_store = None
+
+    def register_attn_store(self, attn_store):
+        if self.attn_store is not None:
+            raise ValueError("Attention store already registered.")
+        self.attn_store = attn_store
 
     def apply_rope(self, xq, xk, freqs_cis):
         xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
@@ -370,8 +295,7 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
-    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None,
-                          attn_store=None):
+    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
         batch_size = hidden_states.shape[0]
 
         qkv = hidden_states.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
@@ -380,9 +304,9 @@ class FluxSingleTransformerBlock(torch.nn.Module):
 
         q, k = self.apply_rope(q, k, image_rotary_emb)
 
-        if attn_store is not None and attn_store.enable:
+        if self.attn_store is not None and self.attn_store.enable:
             entity_attn_maps = get_attn_map(q, k)
-            attn_store.store_attention_probs(entity_attn_maps, mode="single")
+            self.attn_store.store_attention_probs(entity_attn_maps, mode="single")
 
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
@@ -392,14 +316,13 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         return hidden_states
 
     def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None,
-                ipadapter_kwargs_list=None, attn_store=None):
+                ipadapter_kwargs_list=None):
         residual = hidden_states_a
         norm_hidden_states, gate = self.norm(hidden_states_a, emb=temb)
         hidden_states_a = self.to_qkv_mlp(norm_hidden_states)
         attn_output, mlp_hidden_states = hidden_states_a[:, :, :self.dim * 3], hidden_states_a[:, :, self.dim * 3:]
 
-        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list,
-                                             attn_store=attn_store)
+        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
         mlp_hidden_states = torch.nn.functional.gelu(mlp_hidden_states, approximate="tanh")
 
         hidden_states_a = torch.cat([attn_output, mlp_hidden_states], dim=2)
@@ -441,6 +364,7 @@ class FluxDiT(torch.nn.Module):
         self.final_proj_out = torch.nn.Linear(3072, 64)
 
         self.input_dim = input_dim
+        self.attn_store = None
 
     def patchify(self, hidden_states):
         hidden_states = rearrange(hidden_states, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
@@ -548,17 +472,32 @@ class FluxDiT(torch.nn.Module):
         image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
         return prompt_emb, image_rotary_emb, attention_mask
 
+    def register_attn_store(self, attn_store, remove_joint_layer_idx=None, remove_single_layer_idx=None):
+        # TODO: add layer control
+        self.attn_store = attn_store
+        if remove_joint_layer_idx is None:
+            remove_joint_layer_idx = []
+        if remove_single_layer_idx is None:
+            remove_single_layer_idx = []
+        for idx, block in enumerate(self.blocks):
+            if idx in remove_joint_layer_idx:
+                print(f"Removing joint attention block {idx} from attention store.")
+                continue
+            block.register_attn_store(attn_store)
+        for idx, block in enumerate(self.single_blocks):
+            if idx in remove_single_layer_idx:
+                print(f"Removing single attention block {idx} from attention store.")
+                continue
+            block.register_attn_store(attn_store)
+
     def forward(
             self,
             hidden_states,
             timestep, prompt_emb, pooled_prompt_emb, guidance, text_ids, image_ids=None,
             tiled=False, tile_size=128, tile_stride=64, entity_prompt_emb=None, entity_masks=None,
-            use_gradient_checkpointing=False, return_attn_maps=False, mask_gt=None,
+            use_gradient_checkpointing=False, return_attn_map=False,  # for training
             **kwargs
     ):
-        attn_store = None
-        if return_attn_maps:
-            attn_store = AttentionStore(mask_gt)
         if tiled:
             return self.tiled_forward(
                 hidden_states,
@@ -594,38 +533,36 @@ class FluxDiT(torch.nn.Module):
 
             return custom_forward
 
-        for block in self.blocks:
+        for idx, block in enumerate(self.blocks):
             if self.training and use_gradient_checkpointing:
                 hidden_states, prompt_emb = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
-                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask, None, attn_store,
+                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask,
                     use_reentrant=False,
                 )
             else:
                 hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb,
-                                                  attention_mask, attn_store=attn_store)
+                                                  attention_mask)
 
         hidden_states = torch.cat([prompt_emb, hidden_states], dim=1)
-        for block in self.single_blocks:
+        for idx, block in enumerate(self.single_blocks):
             if self.training and use_gradient_checkpointing:
                 hidden_states, prompt_emb = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
-                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask, None, attn_store,
+                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask,
                     use_reentrant=False,
                 )
             else:
                 hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb,
-                                                  attention_mask, attn_store=attn_store)
+                                                  attention_mask,)
         hidden_states = hidden_states[:, prompt_emb.shape[1]:]
 
         hidden_states = self.final_norm_out(hidden_states, conditioning)
         hidden_states = self.final_proj_out(hidden_states)
         hidden_states = self.unpatchify(hidden_states, height, width)
-        if return_attn_maps:
-            # joint_attn, single_attn = attn_store.aggregate_attention()
-            loss_ce, loss_token = attn_store.aggregate_loss()
-            del attn_store
-            return hidden_states, loss_ce, loss_token
+        if return_attn_map:
+            joint_attn, single_attn = self.attn_store.aggregate_attention()
+            return hidden_states, joint_attn, single_attn
         return hidden_states
 
     def quantize(self):

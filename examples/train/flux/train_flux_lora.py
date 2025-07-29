@@ -24,6 +24,92 @@ def token_loss(attn_map, seg_mask):
     return (1 - (attn_map * seg_mask).sum(dim=(2, 3)) / (attn_map.sum(dim=(2, 3)) + 1e-5)).mean()
 
 
+class AttentionStore:
+    def __init__(self):
+        self.joint_attn_store = 0
+        self.single_attn_store = 0
+        self.joint_count = 0
+        self.single_count = 0
+        self.enable = True
+        # self.gt = gt.detach() if gt is not None else None
+        # self.ce_loss = torch.nn.CrossEntropyLoss()
+        # self.token_loss = token_loss
+        # self.loss_ce = []
+        # self.loss_token = []
+
+    def enable_store(self, flag: bool):
+        self.enable = flag
+
+    def empty_store(self):
+        # Explicitly delete tensors to free memory
+        if self.joint_attn_store is not None:
+            del self.joint_attn_store
+        if self.single_attn_store is not None:
+            del self.single_attn_store
+        self.joint_attn_store = None
+        self.single_attn_store = None
+        self.joint_count = 0
+        self.single_count = 0
+        torch.cuda.empty_cache()
+
+    def store_attention_probs(self, attn, mode: str):
+        if not self.enable:
+            return
+
+        # attn = attn.reshape((attn.shape[0], attn.shape[1], 64, 64))
+        # if self.gt is not None:
+        #     loss_ce = self.ce_loss(attn, self.gt)
+        #     self.loss_ce.append(loss_ce)
+        #     loss_token = self.token_loss(attn, self.gt)
+        #     self.loss_token.append(loss_token)
+        #
+        # attn = attn.detach().float().cpu()
+
+        if mode == 'joint':
+            if self.joint_attn_store is None:
+                self.joint_attn_store = attn
+            else:
+                self.joint_attn_store = self.joint_attn_store + attn
+            self.joint_count += 1
+        elif mode == 'single':
+            if self.single_attn_store is None:
+                self.single_attn_store = attn
+            else:
+                self.single_attn_store = self.single_attn_store + attn
+            self.single_count += 1
+        else:
+            raise NotImplementedError
+
+    # def aggregate_loss(self):
+    #     if self.joint_count == 0 or self.single_count == 0:
+    #         return None, None
+    #
+    #     loss_ce = torch.stack(self.loss_ce).mean() if self.loss_ce else None
+    #     loss_token = torch.stack(self.loss_token).mean() if self.loss_token else None
+    #
+    #
+    #     self.empty_store()
+    #     return loss_ce, loss_token
+
+    def aggregate_attention(self):
+        if self.joint_count == 0 or self.single_count == 0:
+            return None, None
+
+        joint_attn = self.joint_attn_store / self.joint_count
+        single_attn = self.single_attn_store / self.single_count
+
+        un_patchify_size = int((joint_attn.shape[-1]) ** 0.5)
+        joint_attn = joint_attn.reshape(joint_attn.shape[0], joint_attn.shape[1], un_patchify_size, un_patchify_size)
+        single_attn = single_attn.reshape(single_attn.shape[0], single_attn.shape[1], un_patchify_size,
+                                          un_patchify_size)
+
+        # Detach results before clearing store
+        joint_attn = joint_attn
+        single_attn = single_attn
+
+        self.empty_store()
+        return joint_attn, single_attn
+
 
 class LightningModel(LightningModelForT2ILoRA):
     def __init__(
@@ -72,12 +158,18 @@ class LightningModel(LightningModelForT2ILoRA):
         self.ce_loss_weight = ce_loss_weight
         self.token_loss_weight = token_loss_weight
 
+        attn_store = AttentionStore()
+        self.pipe.dit.register_attn_store(
+            attn_store,
+            remove_joint_layer_idx=list(range(0, 18, 2)),
+            remove_single_layer_idx=list(range(0, 38, 2))
+        )
+
     def training_step(self, batch, batch_idx):
         text, image = batch["text"], batch["image"]
 
         entity_prompts = []
         entity_masks = []
-        entity_cateogries = []
         for o, iii in enumerate(batch["entity_prompt"]):
             if iii[0] != '':
                 entity_prompts.append(iii[0])
@@ -110,35 +202,32 @@ class LightningModel(LightningModelForT2ILoRA):
         noisy_latents = self.pipe.scheduler.add_noise(latents, noise, timestep)
         training_target = self.pipe.scheduler.training_target(latents, noise, timestep)
 
-        noise_pred, loss_ce, loss_token = self.pipe.denoising_model()(
+        noise_pred, joint_attn, single_attn = self.pipe.denoising_model()(
             noisy_latents, timestep=timestep, **prompt_emb, **extra_input, **eligen_kwargs_posi,
-            use_gradient_checkpointing=self.use_gradient_checkpointing, conditioning=3.5,
-            return_attn_maps=True, mask_gt=seg_mask
+            use_gradient_checkpointing=self.use_gradient_checkpointing, conditioning=3.5, return_attn_map=True
         )
 
         loss_mse = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss_mse = loss_mse * self.pipe.scheduler.training_weight(timestep)
 
         # AM loss
+        # joint_attn, single_attn = self.pipe.dit.attn_store.aggregate_attention()
 
-        # ce_loss = torch.nn.functional.cross_entropy
-        # loss_ce = ce_loss(joint_attn, seg_mask) + ce_loss(single_attn, seg_mask)
-        # loss_ce = loss_ce * self.pipe.scheduler.training_weight(timestep)
-        # loss_token = token_loss(joint_attn, seg_mask) + token_loss(single_attn, seg_mask)
-        # loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
+        ce_loss = torch.nn.functional.cross_entropy
+        loss_ce = ce_loss(joint_attn, seg_mask) + ce_loss(single_attn, seg_mask)
         loss_ce = loss_ce * self.pipe.scheduler.training_weight(timestep)
+        loss_token = token_loss(joint_attn, seg_mask) + token_loss(single_attn, seg_mask)
         loss_token = loss_token * self.pipe.scheduler.training_weight(timestep)
 
-        loss = loss_mse
-        # + self.mask_loss_weight * (self.ce_loss_weight * loss_ce + self.token_loss_weight * loss_token)
+        loss = loss_mse + self.mask_loss_weight * (self.ce_loss_weight * loss_ce + self.token_loss_weight * loss_token)
 
         # Record log
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log("train_loss", loss, prog_bar=True, logger=True)
         self.log("train/lr", current_lr, prog_bar=True, logger=True)
-        # self.log("train/mse_loss", loss_mse, prog_bar=True, logger=True)
-        # self.log("train/ce_loss", loss_ce, prog_bar=True, logger=True)
-        # self.log("train/token_loss", loss_token, prog_bar=True, logger=True)
+        self.log("train/mse_loss", loss_mse, prog_bar=True, logger=True)
+        self.log("train/ce_loss", loss_ce, prog_bar=True, logger=True)
+        self.log("train/token_loss", loss_token, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
