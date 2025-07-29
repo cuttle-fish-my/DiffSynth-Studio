@@ -1,0 +1,549 @@
+[
+    {
+        "img_meta": {
+            "height": 1024,
+            "width": 1024,
+            "captions": "Two friends share a hearty laugh at a bustling café."
+        },
+        "entities": [
+            {
+                "bbox": [
+                    102,
+                    512,
+                    512,
+                    921
+                ],
+                "category": "person",
+                "prompt": "A woman leaning slightly forward with an engaging bright smile"
+            },
+            {
+                "bbox": [
+                    358,
+                    512,
+                    768,
+                    921
+                ],
+                "category": "person",
+                "prompt": "A man presents a relaxed demeanor, with a gentle smile and a calm posture."
+            },
+            {
+                "bbox": [
+                    358,
+                    512,
+                    512,
+                    921
+                ],
+                "category": "overlap",
+                "prompt": "oth friends are seen leaning towards each other; one friend slightly leans forward with a bright smile, taking the foreground, while the other has a relaxed posture, slightly receding into the background."
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "height": 1024,
+            "width": 1024,
+            "captions": "A playful scene where a dog and a cat engage in a friendly tussle on a sunny lawn."
+        },
+        "entities": [
+            {
+                "bbox": [
+                    204,
+                    204,
+                    614,
+                    614
+                ],
+                "category": "dog",
+                "prompt": "A playful dog with a joyful expression and wagging tail"
+            },
+            {
+                "bbox": [
+                    307,
+                    307,
+                    716,
+                    716
+                ],
+                "category": "cat",
+                "prompt": "A nimble cat with alert eyes and a poised stance"
+            },
+            {
+                "bbox": [
+                    307,
+                    307,
+                    614,
+                    614
+                ],
+                "category": "overlap",
+                "prompt": " the cat is seen playfully pawing at the dog’s side while the dog appears to be gently nudging the cat;"
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "height": 1024,
+            "width": 1024,
+            "captions": "A heartwarming scene of a father holding his baby in a cozy room, with a gentle overlap where the father's arm supports the baby."
+        },
+        "entities": [
+            {
+                "bbox": [
+                    300,
+                    200,
+                    800,
+                    950
+                ],
+                "category": "father",
+                "prompt": "A caring father with a gentle smile, holding his baby tenderly."
+            },
+            {
+                "bbox": [
+                    400,
+                    400,
+                    700,
+                    750
+                ],
+                "category": "baby",
+                "prompt": "A precious baby with joyful eyes and a warm expression."
+            },
+            {
+                "bbox": [
+                    400,
+                    400,
+                    700,
+                    750
+                ],
+                "category": "overlap",
+                "prompt": "The father's arm overlaps around the baby, highlighting the close bond and protective care."
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch0/objects365_v1_00001956.jpg",
+            "height": 512,
+            "width": 768,
+            "captions": "Two chefs work diligently in a kitchen preparing dishes with various ingredients on the counter. One chef wearing a white coat and a hat focuses on plating food while the other also in a white coat observes nearby. The workspace is equipped with stainless steel sinks a faucet and a variety of kitchen tools including tongs and spatulas. A surveillance camera is mounted on the wall above ensuring safety and monitoring the area.",
+            "overlap": [
+                [
+                    1,
+                    2
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    394,
+                    70,
+                    712,
+                    511
+                ],
+                "category": "Person",
+                "prompt": "The chef in a white coat and hat, positioned at the counter plating food."
+            },
+            {
+                "bbox": [
+                    184,
+                    6,
+                    359,
+                    341
+                ],
+                "category": "Person",
+                "prompt": "The chef in a white coat standing nearby, observing the plating process."
+            },
+            {
+                "bbox": [
+                    166,
+                    233,
+                    382,
+                    329
+                ],
+                "category": "Sink",
+                "prompt": "A stainless steel sink with a metal faucet in the background, alongside various kitchen utensils."
+            },
+            {
+                "bbox": [
+                    59,
+                    438,
+                    254,
+                    511
+                ],
+                "category": "Plate",
+                "prompt": "Another round white plate beside Plate1, also being prepared with food."
+            },
+            {
+                "bbox": [
+                    202,
+                    399,
+                    369,
+                    467
+                ],
+                "category": "Plate",
+                "prompt": "A round white plate on the counter in front of Person, partially garnished with vegetables."
+            },
+            {
+                "bbox": [
+                    184,
+                    233,
+                    359,
+                    329
+                ],
+                "category": "overlap",
+                "prompt": "In the overlapping region between Person2 and the sink, Person stands in the foreground, with the sink appearing behind him in the background. The chef partially blocks the view of the sink, which is situated farther back along the kitchen counter."
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch0/objects365_v1_00024411.jpg",
+            "height": 649,
+            "width": 512,
+            "captions": "A modern kitchen with white cabinets a green checkered backsplash and a marble island featuring two stools a bowl of fruit and a cutting board with bread.",
+            "overlap": [
+                [
+                    2,
+                    4
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    76,
+                    31,
+                    247,
+                    243
+                ],
+                "category": "Cabinet/shelf",
+                "prompt": "The white cabinet positioned above the counter and near the window."
+            },
+            {
+                "bbox": [
+                    0,
+                    14,
+                    89,
+                    338
+                ],
+                "category": "Cabinet/shelf",
+                "prompt": "The upper-left white cabinet above the counter"
+            },
+            {
+                "bbox": [
+                    21,
+                    377,
+                    145,
+                    609
+                ],
+                "category": "Cabinet/shelf",
+                "prompt": "The white cabinet beneath the island"
+            },
+            {
+                "bbox": [
+                    141,
+                    378,
+                    265,
+                    610
+                ],
+                "category": "Cabinet/shelf",
+                "prompt": "The white cabinet beneath the island"
+            },
+            {
+                "bbox": [
+                    0,
+                    463,
+                    147,
+                    648
+                ],
+                "category": "Stool",
+                "prompt": "One of the tall stools in front of the island, featuring a round, dark seat and metal legsOne of the tall stools in front of the island, featuring a round, dark seat and metal legs"
+            },
+            {
+                "bbox": [
+                    21,
+                    463,
+                    145,
+                    609
+                ],
+                "category": "overlap",
+                "prompt": "In the overlapping area, the stool appears in the foreground, with the white cabinet behind it. The stool partially obscures a portion of the cabinet’s lower section, making the cabinet the background element in that region."
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch0/objects365_v1_00021182.jpg",
+            "height": 512,
+            "width": 770,
+            "captions": "A plate with a sausage cherry tomato and creamy sauce sits on a wooden table accompanied by a fork and a basket of bread in the background.",
+            "overlap": [
+                [
+                    0,
+                    2
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    122,
+                    241,
+                    709,
+                    511
+                ],
+                "category": "Plate",
+                "prompt": "A round plate holding the main food items (sausage, creamy sauce, lettuce, and a cherry tomato garnish)."
+            },
+            {
+                "bbox": [
+                    0,
+                    -1,
+                    478,
+                    284
+                ],
+                "category": "Bakset",
+                "prompt": "A woven bread basket in the background, containing several rolls or pieces of bread"
+            },
+            {
+                "bbox": [
+                    194,
+                    261,
+                    662,
+                    464
+                ],
+                "category": "Sausage",
+                "prompt": "A long, browned sausage with a crisscross pattern on its surface, placed prominently on the plate."
+            },
+            {
+                "bbox": [
+                    522,
+                    180,
+                    769,
+                    367
+                ],
+                "category": "Fork",
+                "prompt": "A metallic fork with a dark handle resting on the wooden table to the right of the plate."
+            },
+            {
+                "bbox": [
+                    194,
+                    261,
+                    662,
+                    464
+                ],
+                "category": "overlap",
+                "prompt": "The sausage is positioned on top of the plate, so it appears in the foreground. The plate extends behind it, forming the background in the overlapping area. In other words, the front surface of the sausage partially covers the plate, and the plate’s rim and surface are visible around and behind the sausage."
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch1/objects365_v1_00090266.jpg",
+            "height": 512,
+            "width": 725,
+            "captions": "A modern kitchen with sleek black cabinets white countertops and a large dining table surrounded by white chairs. The space features a pendant lamp above the table a sink with a faucet and built-in appliances including an oven and microwave. Large windows offer a view of the outdoors while the floor is finished with light wood planks.",
+            "overlap": [
+                [
+                    1,
+                    4
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    182,
+                    307,
+                    469,
+                    501
+                ],
+                "category": "Desk",
+                "prompt": "The large, dark-surfaced dining table in the center of the kitchen."
+            },
+            {
+                "bbox": [
+                    415,
+                    321,
+                    558,
+                    499
+                ],
+                "category": "Chair",
+                "prompt": "A white chair with a curved backrest"
+            },
+            {
+                "bbox": [
+                    346,
+                    53,
+                    416,
+                    253
+                ],
+                "category": "Lamp",
+                "prompt": "The pendant lamp hanging from the ceiling above the dining table."
+            },
+            {
+                "bbox": [
+                    132,
+                    325,
+                    209,
+                    478
+                ],
+                "category": "Chair",
+                "prompt": "A white chair with a curved backrest"
+            },
+            {
+                "bbox": [
+                    451,
+                    311,
+                    539,
+                    436
+                ],
+                "category": "Chair",
+                "prompt": "A white chair with a curved backrest"
+            },
+            {
+                "bbox": [
+                    451,
+                    321,
+                    539,
+                    436
+                ],
+                "category": "overlap",
+                "prompt": ""
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch1/objects365_v1_00081092.jpg",
+            "height": 512,
+            "width": 772,
+            "captions": "A vendor sits behind a table displaying freshly baked pies surrounded by storage boxes canned goods and a variety of tea pots on display above.",
+            "overlap": [
+                [
+                    1,
+                    3
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    0,
+                    356,
+                    772,
+                    509
+                ],
+                "category": "Desk",
+                "prompt": "The primary tabletop or counter surface at the front of the vendor’s stall, displaying freshly baked pies and various goods."
+            },
+            {
+                "bbox": [
+                    387,
+                    136,
+                    626,
+                    375
+                ],
+                "category": "Person",
+                "prompt": "The vendor seated behind the table, wearing a traditional cap and a dark jacket."
+            },
+            {
+                "bbox": [
+                    550,
+                    195,
+                    642,
+                    405
+                ],
+                "category": "Recorder",
+                "prompt": "A small electronic device positioned near the vendor, possibly used for playing or recording audio."
+            },
+            {
+                "bbox": [
+                    45,
+                    256,
+                    186,
+                    387
+                ],
+                "category": "Storage box",
+                "prompt": "A box or container placed on or near the desk"
+            },
+            {
+                "bbox": [
+                    550,
+                    195,
+                    626,
+                    375
+                ],
+                "category": "overlap",
+                "prompt": "the recorder appears in the foreground"
+            }
+        ]
+    },
+    {
+        "img_meta": {
+            "img_dir": "images/v1/patch1/objects365_v1_00067503.jpg",
+            "height": 512,
+            "width": 790,
+            "captions": "A vintage scene featuring two horses pulling a carriage loaded with hay with several people sitting atop the load set against a backdrop of trees and open field.",
+            "overlap": [
+                [
+                    0,
+                    1
+                ],
+                [
+                    0,
+                    2
+                ]
+            ]
+        },
+        "entities": [
+            {
+                "bbox": [
+                    121,
+                    196,
+                    568,
+                    415
+                ],
+                "category": "Carriage",
+                "prompt": "A wooden carriage loaded with hay, with multiple people seated atop the hay, being pulled by two horses."
+            },
+            {
+                "bbox": [
+                    216,
+                    211,
+                    418,
+                    434
+                ],
+                "category": "Horse",
+                "prompt": "The white horse in harness on one side of the carriage, standing in the foreground."
+            },
+            {
+                "bbox": [
+                    129,
+                    217,
+                    268,
+                    418
+                ],
+                "category": "Horse",
+                "prompt": "The darker horse on the other side of the carriage, also harnessed and pulling the load."
+            },
+            {
+                "bbox": [
+                    216,
+                    211,
+                    418,
+                    415
+                ],
+                "category": "overlap",
+                "prompt": "The white horse, positioned on one side of the carriage, is in the foreground. Its body and harness partially obscure the side of the wooden carriage it’s attached to, which remains in the background. The horse's overlapping area highlights the connection through its harness, emphasizing that it is pulling the carriage."
+            },
+            {
+                "bbox": [
+                    129,
+                    217,
+                    268,
+                    415
+                ],
+                "category": "overlap",
+                "prompt": "the darker horse on the opposite side is in the foreground. Its body and harness also overlap with the adjacent side of the carriage, partially covering it. This overlap indicates that the horse is actively engaged in pulling the carriage, with the carriage itself positioned in the background relative to the horse."
+            }
+        ]
+    }
+]

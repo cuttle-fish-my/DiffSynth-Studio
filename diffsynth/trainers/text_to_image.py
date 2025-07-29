@@ -1,18 +1,17 @@
 import lightning as pl
 from peft import LoraConfig, inject_adapter_in_model
 import torch, os
-from ..data.simple_text_image import TextImageDataset
+from ..data.simple_text_image import TextImageDataset, AmodalTextImageDataset, L2IValDataset
 from modelscope.hub.api import HubApi
 from ..models.utils import load_state_dict
 
 
-
 class LightningModelForT2ILoRA(pl.LightningModule):
     def __init__(
-        self,
-        learning_rate=1e-4,
-        use_gradient_checkpointing=True,
-        state_dict_converter=None,
+            self,
+            learning_rate=1e-4,
+            use_gradient_checkpointing=True,
+            state_dict_converter=None,
     ):
         super().__init__()
         # Set parameters
@@ -21,11 +20,9 @@ class LightningModelForT2ILoRA(pl.LightningModule):
         self.state_dict_converter = state_dict_converter
         self.lora_alpha = None
 
-
     def load_models(self):
         # This function is implemented in other modules
         self.pipe = None
-
 
     def freeze_parameters(self):
         # Freeze parameters
@@ -33,13 +30,13 @@ class LightningModelForT2ILoRA(pl.LightningModule):
         self.pipe.eval()
         self.pipe.denoising_model().train()
 
-    
-    def add_lora_to_model(self, model, lora_rank=4, lora_alpha=4, lora_target_modules="to_q,to_k,to_v,to_out", init_lora_weights="gaussian", pretrained_lora_path=None, state_dict_converter=None):
+    def add_lora_to_model(self, model, lora_rank=4, lora_alpha=4, lora_target_modules="to_q,to_k,to_v,to_out",
+                          init_lora_weights="gaussian", pretrained_lora_path=None, state_dict_converter=None):
         # Add LoRA to UNet
         self.lora_alpha = lora_alpha
         if init_lora_weights == "kaiming":
             init_lora_weights = True
-            
+
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,
@@ -61,8 +58,8 @@ class LightningModelForT2ILoRA(pl.LightningModule):
             all_keys = [i for i, _ in model.named_parameters()]
             num_updated_keys = len(all_keys) - len(missing_keys)
             num_unexpected_keys = len(unexpected_keys)
-            print(f"{num_updated_keys} parameters are loaded from {pretrained_lora_path}. {num_unexpected_keys} parameters are unexpected.")
-
+            print(
+                f"{num_updated_keys} parameters are loaded from {pretrained_lora_path}. {num_unexpected_keys} parameters are unexpected.")
 
     def training_step(self, batch, batch_idx):
         # Data
@@ -94,16 +91,56 @@ class LightningModelForT2ILoRA(pl.LightningModule):
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
-
     def configure_optimizers(self):
-        trainable_modules = filter(lambda p: p.requires_grad, self.pipe.denoising_model().parameters())
+        trainable_modules = list(filter(lambda p: p.requires_grad, self.pipe.denoising_model().parameters()))
+        print(f"Number of trainable parameters: {sum(p.numel() for p in trainable_modules)}")
         optimizer = torch.optim.AdamW(trainable_modules, lr=self.learning_rate)
-        return optimizer
-    
+
+        # return optimizer
+
+        # Linear scheduler with warmup
+        from torch.optim.lr_scheduler import LinearLR, SequentialLR
+
+        # Define warmup and decay phases
+        warmup_steps = 5000  # Adjust based on your needs
+        total_steps = 50 * 5000  # Adjust based on your training steps
+
+        # Warmup scheduler: linearly increase from 0 to learning_rate
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=0.01,  # Start at 1% of learning_rate
+            end_factor=1.0,  # End at 100% of learning_rate
+            total_iters=warmup_steps
+        )
+
+        # Decay scheduler: linearly decrease from learning_rate to 0
+        decay_scheduler = LinearLR(
+            optimizer,
+            start_factor=1.0,  # Start at 100% of learning_rate
+            end_factor=0.1,  # End at 10% of learning_rate
+            total_iters=total_steps - warmup_steps
+        )
+
+        # Combine warmup and decay
+        lr_scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, decay_scheduler],
+            milestones=[warmup_steps]
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": lr_scheduler,
+                "interval": "step",  # Update every step
+                "frequency": 1
+            }
+        }
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint.clear()
-        trainable_param_names = list(filter(lambda named_param: named_param[1].requires_grad, self.pipe.denoising_model().named_parameters()))
+        trainable_param_names = list(
+            filter(lambda named_param: named_param[1].requires_grad, self.pipe.denoising_model().named_parameters()))
         trainable_param_names = set([named_param[0] for named_param in trainable_param_names])
         state_dict = self.pipe.denoising_model().state_dict()
         lora_state_dict = {}
@@ -113,7 +150,6 @@ class LightningModelForT2ILoRA(pl.LightningModule):
         if self.state_dict_converter is not None:
             lora_state_dict = self.state_dict_converter(lora_state_dict, alpha=self.lora_alpha)
         checkpoint.update(lora_state_dict)
-
 
 
 def add_general_parsers(parser):
@@ -261,12 +297,22 @@ def add_general_parsers(parser):
         default=None,
         help="SwanLab mode (cloud or local).",
     )
+    parser.add_argument(
+        "--swanlab_project_name",
+        type=str,
+        default="overlap_eligen",
+    )
+    parser.add_argument(
+        "--swanlab_experiment_name",
+        type=str,
+        default="debug",
+    )
     return parser
 
 
 def launch_training_task(model, args):
     # dataset and data loader
-    dataset = TextImageDataset(
+    dataset = AmodalTextImageDataset(
         args.dataset_path,
         steps_per_epoch=args.steps_per_epoch * args.batch_size,
         height=args.height,
@@ -280,14 +326,21 @@ def launch_training_task(model, args):
         batch_size=args.batch_size,
         num_workers=args.dataloader_num_workers
     )
+    val_dataset = L2IValDataset()
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        shuffle=False,
+        batch_size=1,
+        num_workers=args.dataloader_num_workers
+    )
     # train
     if args.use_swanlab:
         from swanlab.integration.pytorch_lightning import SwanLabLogger
         swanlab_config = {"UPPERFRAMEWORK": "DiffSynth-Studio"}
         swanlab_config.update(vars(args))
         swanlab_logger = SwanLabLogger(
-            project="diffsynth_studio", 
-            name="diffsynth_studio",
+            project=args.swanlab_project_name,
+            name=args.swanlab_experiment_name,
             config=swanlab_config,
             mode=args.swanlab_mode,
             logdir=os.path.join(args.output_path, "swanlog"),
@@ -305,8 +358,13 @@ def launch_training_task(model, args):
         accumulate_grad_batches=args.accumulate_grad_batches,
         callbacks=[pl.pytorch.callbacks.ModelCheckpoint(save_top_k=-1)],
         logger=logger,
+        log_every_n_steps=1,
     )
-    trainer.fit(model=model, train_dataloaders=train_loader)
+    trainer.fit(
+        model=model,
+        train_dataloaders=train_loader,
+        # val_dataloaders=val_loader
+    )
 
     # Upload models
     if args.modelscope_model_id is not None and args.modelscope_access_token is not None:

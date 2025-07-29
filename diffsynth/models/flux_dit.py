@@ -1,8 +1,10 @@
 import torch
+
 from .sd3_dit import TimestepEmbeddings, AdaLayerNorm, RMSNorm
 from einops import rearrange
 from .tiler import TileWorker
 from .utils import init_weights_on_device
+
 
 def interact_with_ipadapter(hidden_states, q, ip_k, ip_v, scale=1.0):
     batch_size, num_tokens = hidden_states.shape[0:2]
@@ -12,6 +14,130 @@ def interact_with_ipadapter(hidden_states, q, ip_k, ip_v, scale=1.0):
     return hidden_states
 
 
+def get_attn_score(query, key, attention_mask=None):
+    dtype = query.dtype
+
+    if attention_mask is None:
+        baddbmm_input = torch.empty(
+            query.shape[0], query.shape[1], key.shape[1], dtype=query.dtype, device=query.device
+        )
+        beta = 0
+    else:
+        baddbmm_input = attention_mask
+        beta = 1
+
+    attention_scores = torch.baddbmm(
+        baddbmm_input,
+        query,
+        key.transpose(-1, -2),
+        beta=beta,
+        alpha=64 ** -0.5,
+    )
+
+    del baddbmm_input
+    attention_probs = attention_scores.sigmoid()
+    del attention_scores
+
+    attention_probs = attention_probs.to(dtype)
+
+    return attention_probs
+
+
+def get_attn_map(q, k, img_token_size=4096, single_token_size=512):
+    batch_size, num_heads, num_tokens, head_dim = q.shape
+    # [bs * num_heads, img_token_size, head_dim]
+    img_q = q[:, :, -img_token_size:, :].reshape(-1, img_token_size, head_dim)
+    # [bs * num_heads, num_tokens - img_token_size, head_dim]
+    txt_k = k[:, :, :-img_token_size, :].reshape(-1, num_tokens - img_token_size, head_dim)
+
+    # usually 3 during training, one for global prompt, two for local prompts
+    num_txt_prompts = (num_tokens - img_token_size) // single_token_size
+
+    # [bs * num_heads, single_token_size, head_dim] * (num_txt_prompts - 1)
+    entity_txt_k = txt_k.chunk(num_txt_prompts, dim=1)[:-1]
+
+    # [bs * num_heads, single_token_size, img_token_size] * (num_txt_prompts - 1)
+    entity_img_attn_map = [get_attn_score(img_q, txt_k) for txt_k in entity_txt_k]
+    entity_img_attn_map = [attn_map.reshape(batch_size, num_heads, img_token_size, single_token_size) for attn_map in
+                           entity_img_attn_map]
+    entity_img_attn_map = [attn_map.permute((0, 1, 3, 2)) for attn_map in entity_img_attn_map]
+
+    # [bs, (num_txt_prompts - 1), img_token_size]
+    entity_img_attn_map = torch.stack([attn_map.mean(dim=[1, 2]) for attn_map in entity_img_attn_map], dim=1)
+
+    return entity_img_attn_map
+
+def token_loss(attn_map, seg_mask):
+    return (1 - (attn_map * seg_mask).sum(dim=(2, 3)) / (attn_map.sum(dim=(2, 3)) + 1e-5)).mean()
+
+
+class AttentionStore:
+    def __init__(self, gt):
+        self.joint_attn_store = 0
+        self.single_attn_store = 0
+        self.joint_count = 0
+        self.single_count = 0
+        self.enable = True
+        self.gt = gt.detach() if gt else None
+        self.ce_loss = torch.nn.CrossEntropyLoss()
+        self.token_loss = token_loss
+
+    def enable_store(self, flag: bool):
+        self.enable = flag
+
+    def empty_store(self):
+        # Explicitly delete tensors to free memory
+        if self.joint_attn_store is not None:
+            del self.joint_attn_store
+        if self.single_attn_store is not None:
+            del self.single_attn_store
+        self.joint_attn_store = None
+        self.single_attn_store = None
+        self.joint_count = 0
+        self.single_count = 0
+        torch.cuda.empty_cache()
+
+    def store_attention_probs(self, attn, mode: str):
+        if not self.enable:
+            return
+
+        attn = attn.reshape((attn.shape[0], attn.shape[1], 64, 64))
+
+        # if mode == 'joint':
+        #     if self.joint_attn_store is None:
+        #         self.joint_attn_store = attn
+        #     else:
+        #         self.joint_attn_store = self.joint_attn_store + attn
+        #     self.joint_count += 1
+        # elif mode == 'single':
+        #     if self.single_attn_store is None:
+        #         self.single_attn_store = attn
+        #     else:
+        #         self.single_attn_store = self.single_attn_store + attn
+        #     self.single_count += 1
+        # else:
+        #     raise NotImplementedError
+
+    def aggregate_attention(self):
+        if self.joint_count == 0 or self.single_count == 0:
+            return None, None
+
+        joint_attn = self.joint_attn_store / self.joint_count
+        single_attn = self.single_attn_store / self.single_count
+
+        un_patchify_size = int((joint_attn.shape[-1]) ** 0.5)
+        joint_attn = joint_attn.reshape(joint_attn.shape[0], joint_attn.shape[1], un_patchify_size, un_patchify_size)
+        single_attn = single_attn.reshape(single_attn.shape[0], single_attn.shape[1], un_patchify_size,
+                                          un_patchify_size)
+
+        # Detach results before clearing store
+        joint_attn = joint_attn
+        single_attn = single_attn
+
+        self.empty_store()
+        return joint_attn, single_attn
+
+
 class RoPEEmbedding(torch.nn.Module):
     def __init__(self, dim, theta, axes_dim):
         super().__init__()
@@ -19,12 +145,11 @@ class RoPEEmbedding(torch.nn.Module):
         self.theta = theta
         self.axes_dim = axes_dim
 
-
     def rope(self, pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
         assert dim % 2 == 0, "The dimension must be even."
 
         scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
-        omega = 1.0 / (theta**scale)
+        omega = 1.0 / (theta ** scale)
 
         batch_size, seq_length = pos.shape
         out = torch.einsum("...n,d->...nd", pos, omega)
@@ -35,12 +160,10 @@ class RoPEEmbedding(torch.nn.Module):
         out = stacked_out.view(batch_size, -1, dim // 2, 2, 2)
         return out.float()
 
-
     def forward(self, ids):
         n_axes = ids.shape[-1]
         emb = torch.cat([self.rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)], dim=-3)
         return emb.unsqueeze(1)
-
 
 
 class FluxJointAttention(torch.nn.Module):
@@ -62,7 +185,6 @@ class FluxJointAttention(torch.nn.Module):
         if not only_out_a:
             self.b_to_out = torch.nn.Linear(dim_b, dim_b)
 
-
     def apply_rope(self, xq, xk, freqs_cis):
         xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
         xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
@@ -70,7 +192,8 @@ class FluxJointAttention(torch.nn.Module):
         xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
-    def forward(self, hidden_states_a, hidden_states_b, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None,
+                attn_store=None):
         batch_size = hidden_states_a.shape[0]
 
         # Part A
@@ -91,10 +214,16 @@ class FluxJointAttention(torch.nn.Module):
 
         q, k = self.apply_rope(q, k, image_rotary_emb)
 
+        if attn_store is not None and attn_store.enable:
+            entity_attn_maps = get_attn_map(q, k)
+            # TODO: add attn_store implementation
+            attn_store.store_attention_probs(entity_attn_maps, mode="joint")
+
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
         hidden_states = hidden_states.to(q.dtype)
-        hidden_states_b, hidden_states_a = hidden_states[:, :hidden_states_b.shape[1]], hidden_states[:, hidden_states_b.shape[1]:]
+        hidden_states_b, hidden_states_a = hidden_states[:, :hidden_states_b.shape[1]], hidden_states[:,
+                                                                                        hidden_states_b.shape[1]:]
         if ipadapter_kwargs_list is not None:
             hidden_states_a = interact_with_ipadapter(hidden_states_a, q_a, **ipadapter_kwargs_list)
         hidden_states_a = self.a_to_out(hidden_states_a)
@@ -104,6 +233,8 @@ class FluxJointAttention(torch.nn.Module):
             hidden_states_b = self.b_to_out(hidden_states_b)
             return hidden_states_a, hidden_states_b
 
+
+# A: image features, size 4096 * 3072; B: text features, 512 for each, size (n * 512) * 3072
 
 
 class FluxJointTransformerBlock(torch.nn.Module):
@@ -116,25 +247,26 @@ class FluxJointTransformerBlock(torch.nn.Module):
 
         self.norm2_a = torch.nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff_a = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim*4),
+            torch.nn.Linear(dim, dim * 4),
             torch.nn.GELU(approximate="tanh"),
-            torch.nn.Linear(dim*4, dim)
+            torch.nn.Linear(dim * 4, dim)
         )
 
         self.norm2_b = torch.nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff_b = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim*4),
+            torch.nn.Linear(dim, dim * 4),
             torch.nn.GELU(approximate="tanh"),
-            torch.nn.Linear(dim*4, dim)
+            torch.nn.Linear(dim * 4, dim)
         )
 
-
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None,
+                ipadapter_kwargs_list=None, attn_store=None):
         norm_hidden_states_a, gate_msa_a, shift_mlp_a, scale_mlp_a, gate_mlp_a = self.norm1_a(hidden_states_a, emb=temb)
         norm_hidden_states_b, gate_msa_b, shift_mlp_b, scale_mlp_b, gate_mlp_b = self.norm1_b(hidden_states_b, emb=temb)
 
         # Attention
-        attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
+        attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb,
+                                                 attn_mask, ipadapter_kwargs_list, attn_store=attn_store)
 
         # Part A
         hidden_states_a = hidden_states_a + gate_msa_a * attn_output_a
@@ -149,7 +281,6 @@ class FluxJointTransformerBlock(torch.nn.Module):
         return hidden_states_a, hidden_states_b
 
 
-
 class FluxSingleAttention(torch.nn.Module):
     def __init__(self, dim_a, dim_b, num_heads, head_dim):
         super().__init__()
@@ -161,14 +292,12 @@ class FluxSingleAttention(torch.nn.Module):
         self.norm_q_a = RMSNorm(head_dim, eps=1e-6)
         self.norm_k_a = RMSNorm(head_dim, eps=1e-6)
 
-
     def apply_rope(self, xq, xk, freqs_cis):
         xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
         xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
         xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
         xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
-
 
     def forward(self, hidden_states, image_rotary_emb):
         batch_size = hidden_states.shape[0]
@@ -186,7 +315,6 @@ class FluxSingleAttention(torch.nn.Module):
         return hidden_states
 
 
-
 class AdaLayerNormSingle(torch.nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -194,13 +322,11 @@ class AdaLayerNormSingle(torch.nn.Module):
         self.linear = torch.nn.Linear(dim, 3 * dim, bias=True)
         self.norm = torch.nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
 
-
     def forward(self, x, emb):
         emb = self.linear(self.silu(emb))
         shift_msa, scale_msa, gate_msa = emb.chunk(3, dim=1)
         x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
         return x, gate_msa
-
 
 
 class FluxSingleTransformerBlock(torch.nn.Module):
@@ -217,7 +343,6 @@ class FluxSingleTransformerBlock(torch.nn.Module):
 
         self.proj_out = torch.nn.Linear(dim * 5, dim)
 
-
     def apply_rope(self, xq, xk, freqs_cis):
         xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
         xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
@@ -225,8 +350,8 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
-
-    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None,
+                          attn_store=None):
         batch_size = hidden_states.shape[0]
 
         qkv = hidden_states.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
@@ -235,6 +360,10 @@ class FluxSingleTransformerBlock(torch.nn.Module):
 
         q, k = self.apply_rope(q, k, image_rotary_emb)
 
+        if attn_store is not None and attn_store.enable:
+            entity_attn_maps = get_attn_map(q, k)
+            attn_store.store_attention_probs(entity_attn_maps, mode="single")
+
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
         hidden_states = hidden_states.to(q.dtype)
@@ -242,14 +371,15 @@ class FluxSingleTransformerBlock(torch.nn.Module):
             hidden_states = interact_with_ipadapter(hidden_states, q, **ipadapter_kwargs_list)
         return hidden_states
 
-
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None,
+                ipadapter_kwargs_list=None, attn_store=None):
         residual = hidden_states_a
         norm_hidden_states, gate = self.norm(hidden_states_a, emb=temb)
         hidden_states_a = self.to_qkv_mlp(norm_hidden_states)
         attn_output, mlp_hidden_states = hidden_states_a[:, :, :self.dim * 3], hidden_states_a[:, :, self.dim * 3:]
 
-        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
+        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list,
+                                             attn_store=attn_store)
         mlp_hidden_states = torch.nn.functional.gelu(mlp_hidden_states, approximate="tanh")
 
         hidden_states_a = torch.cat([attn_output, mlp_hidden_states], dim=2)
@@ -257,7 +387,6 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         hidden_states_a = residual + hidden_states_a
 
         return hidden_states_a, hidden_states_b
-
 
 
 class AdaLayerNormContinuous(torch.nn.Module):
@@ -274,14 +403,14 @@ class AdaLayerNormContinuous(torch.nn.Module):
         return x
 
 
-
 class FluxDiT(torch.nn.Module):
     def __init__(self, disable_guidance_embedder=False, input_dim=64, num_blocks=19):
         super().__init__()
         self.pos_embedder = RoPEEmbedding(3072, 10000, [16, 56, 56])
         self.time_embedder = TimestepEmbeddings(256, 3072)
         self.guidance_embedder = None if disable_guidance_embedder else TimestepEmbeddings(256, 3072)
-        self.pooled_text_embedder = torch.nn.Sequential(torch.nn.Linear(768, 3072), torch.nn.SiLU(), torch.nn.Linear(3072, 3072))
+        self.pooled_text_embedder = torch.nn.Sequential(torch.nn.Linear(768, 3072), torch.nn.SiLU(),
+                                                        torch.nn.Linear(3072, 3072))
         self.context_embedder = torch.nn.Linear(4096, 3072)
         self.x_embedder = torch.nn.Linear(input_dim, 3072)
 
@@ -290,19 +419,17 @@ class FluxDiT(torch.nn.Module):
 
         self.final_norm_out = AdaLayerNormContinuous(3072)
         self.final_proj_out = torch.nn.Linear(3072, 64)
-        
-        self.input_dim = input_dim
 
+        self.input_dim = input_dim
 
     def patchify(self, hidden_states):
         hidden_states = rearrange(hidden_states, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
         return hidden_states
 
-
     def unpatchify(self, hidden_states, height, width):
-        hidden_states = rearrange(hidden_states, "B (H W) (C P Q) -> B C (H P) (W Q)", P=2, Q=2, H=height//2, W=width//2)
+        hidden_states = rearrange(hidden_states, "B (H W) (C P Q) -> B C (H P) (W Q)", P=2, Q=2, H=height // 2,
+                                  W=width // 2)
         return hidden_states
-
 
     def prepare_image_ids(self, latents):
         batch_size, _, height, width = latents.shape
@@ -320,13 +447,12 @@ class FluxDiT(torch.nn.Module):
 
         return latent_image_ids
 
-
     def tiled_forward(
-        self,
-        hidden_states,
-        timestep, prompt_emb, pooled_prompt_emb, guidance, text_ids,
-        tile_size=128, tile_stride=64,
-        **kwargs
+            self,
+            hidden_states,
+            timestep, prompt_emb, pooled_prompt_emb, guidance, text_ids,
+            tile_size=128, tile_stride=64,
+            **kwargs
     ):
         # Due to the global positional embedding, we cannot implement layer-wise tiled forward.
         hidden_states = TileWorker().tiled_forward(
@@ -339,13 +465,13 @@ class FluxDiT(torch.nn.Module):
         )
         return hidden_states
 
-
     def construct_mask(self, entity_masks, prompt_seq_len, image_seq_len):
         N = len(entity_masks)
         batch_size = entity_masks[0].shape[0]
         total_seq_len = N * prompt_seq_len + image_seq_len
         patched_masks = [self.patchify(entity_masks[i]) for i in range(N)]
-        attention_mask = torch.ones((batch_size, total_seq_len, total_seq_len), dtype=torch.bool).to(device=entity_masks[0].device)
+        attention_mask = torch.ones((batch_size, total_seq_len, total_seq_len), dtype=torch.bool).to(
+            device=entity_masks[0].device)
 
         image_start = N * prompt_seq_len
         image_end = N * prompt_seq_len + image_seq_len
@@ -374,7 +500,6 @@ class FluxDiT(torch.nn.Module):
         attention_mask[attention_mask == 1] = 0
         return attention_mask
 
-
     def process_entity_masks(self, hidden_states, prompt_emb, entity_prompt_emb, entity_masks, text_ids, image_ids):
         repeat_dim = hidden_states.shape[1]
         max_masks = 0
@@ -387,14 +512,14 @@ class FluxDiT(torch.nn.Module):
             entity_masks = [entity_masks[:, i, None].squeeze(1) for i in range(max_masks)]
             # global mask
             global_mask = torch.ones_like(entity_masks[0]).to(device=hidden_states.device, dtype=hidden_states.dtype)
-            entity_masks = entity_masks + [global_mask] # append global to last
+            entity_masks = entity_masks + [global_mask]  # append global to last
             # attention mask
             attention_mask = self.construct_mask(entity_masks, prompt_emb.shape[1], hidden_states.shape[1])
             attention_mask = attention_mask.to(device=hidden_states.device, dtype=hidden_states.dtype)
             attention_mask = attention_mask.unsqueeze(1)
             # embds: n_masks * b * seq * d
             local_embs = [entity_prompt_emb[:, i, None].squeeze(1) for i in range(max_masks)]
-            prompt_embs = local_embs + prompt_embs # append global to last
+            prompt_embs = local_embs + prompt_embs  # append global to last
         prompt_embs = [self.context_embedder(prompt_emb) for prompt_emb in prompt_embs]
         prompt_emb = torch.cat(prompt_embs, dim=1)
 
@@ -403,15 +528,17 @@ class FluxDiT(torch.nn.Module):
         image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
         return prompt_emb, image_rotary_emb, attention_mask
 
-
     def forward(
-        self,
-        hidden_states,
-        timestep, prompt_emb, pooled_prompt_emb, guidance, text_ids, image_ids=None,
-        tiled=False, tile_size=128, tile_stride=64, entity_prompt_emb=None, entity_masks=None,
-        use_gradient_checkpointing=False,
-        **kwargs
+            self,
+            hidden_states,
+            timestep, prompt_emb, pooled_prompt_emb, guidance, text_ids, image_ids=None,
+            tiled=False, tile_size=128, tile_stride=64, entity_prompt_emb=None, entity_masks=None,
+            use_gradient_checkpointing=False, return_attn_maps=False, mask_gt=None,
+            **kwargs
     ):
+        attn_store = None
+        if return_attn_maps:
+            attn_store = AttentionStore(mask_gt)
         if tiled:
             return self.tiled_forward(
                 hidden_states,
@@ -433,7 +560,9 @@ class FluxDiT(torch.nn.Module):
         hidden_states = self.x_embedder(hidden_states)
 
         if entity_prompt_emb is not None and entity_masks is not None:
-            prompt_emb, image_rotary_emb, attention_mask = self.process_entity_masks(hidden_states, prompt_emb, entity_prompt_emb, entity_masks, text_ids, image_ids)
+            prompt_emb, image_rotary_emb, attention_mask = self.process_entity_masks(hidden_states, prompt_emb,
+                                                                                     entity_prompt_emb, entity_masks,
+                                                                                     text_ids, image_ids)
         else:
             prompt_emb = self.context_embedder(prompt_emb)
             image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
@@ -442,36 +571,41 @@ class FluxDiT(torch.nn.Module):
         def create_custom_forward(module):
             def custom_forward(*inputs):
                 return module(*inputs)
+
             return custom_forward
 
         for block in self.blocks:
             if self.training and use_gradient_checkpointing:
                 hidden_states, prompt_emb = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
-                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask,
+                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask, None, attn_store,
                     use_reentrant=False,
                 )
             else:
-                hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask)
+                hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb,
+                                                  attention_mask, attn_store=attn_store)
 
         hidden_states = torch.cat([prompt_emb, hidden_states], dim=1)
         for block in self.single_blocks:
             if self.training and use_gradient_checkpointing:
                 hidden_states, prompt_emb = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
-                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask,
+                    hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask, None, attn_store,
                     use_reentrant=False,
                 )
             else:
-                hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb, attention_mask)
+                hidden_states, prompt_emb = block(hidden_states, prompt_emb, conditioning, image_rotary_emb,
+                                                  attention_mask, attn_store=attn_store)
         hidden_states = hidden_states[:, prompt_emb.shape[1]:]
 
         hidden_states = self.final_norm_out(hidden_states, conditioning)
         hidden_states = self.final_proj_out(hidden_states)
         hidden_states = self.unpatchify(hidden_states, height, width)
-
+        if return_attn_maps:
+            joint_attn, single_attn = attn_store.aggregate_attention()
+            del attn_store
+            return hidden_states, joint_attn, single_attn
         return hidden_states
-
 
     def quantize(self):
         def cast_to(weight, dtype=None, device=None, copy=False):
@@ -512,17 +646,17 @@ class FluxDiT(torch.nn.Module):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
 
-                def forward(self,input,**kwargs):
-                    weight,bias= cast_bias_weight(self,input)
-                    return torch.nn.functional.linear(input,weight,bias)
+                def forward(self, input, **kwargs):
+                    weight, bias = cast_bias_weight(self, input)
+                    return torch.nn.functional.linear(input, weight, bias)
 
             class RMSNorm(torch.nn.Module):
                 def __init__(self, module):
                     super().__init__()
                     self.module = module
 
-                def forward(self,hidden_states,**kwargs):
-                    weight= cast_weight(self.module,hidden_states)
+                def forward(self, hidden_states, **kwargs):
+                    weight = cast_weight(self.module, hidden_states)
                     input_dtype = hidden_states.dtype
                     variance = hidden_states.to(torch.float32).square().mean(-1, keepdim=True)
                     hidden_states = hidden_states * torch.rsqrt(variance + self.module.eps)
@@ -533,23 +667,22 @@ class FluxDiT(torch.nn.Module):
             for name, module in model.named_children():
                 if isinstance(module, torch.nn.Linear):
                     with init_weights_on_device():
-                        new_layer = quantized_layer.Linear(module.in_features,module.out_features)
+                        new_layer = quantized_layer.Linear(module.in_features, module.out_features)
                     new_layer.weight = module.weight
                     if module.bias is not None:
                         new_layer.bias = module.bias
                     # del module
                     setattr(model, name, new_layer)
                 elif isinstance(module, RMSNorm):
-                    if hasattr(module,"quantized"):
+                    if hasattr(module, "quantized"):
                         continue
-                    module.quantized= True
+                    module.quantized = True
                     new_layer = quantized_layer.RMSNorm(module)
                     setattr(model, name, new_layer)
                 else:
                     replace_layer(module)
 
         replace_layer(self)
-
 
     @staticmethod
     def state_dict_converter():
